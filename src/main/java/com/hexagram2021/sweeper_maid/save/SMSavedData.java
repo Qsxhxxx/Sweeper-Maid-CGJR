@@ -10,6 +10,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.saveddata.SavedData;
 
 import javax.annotation.Nullable;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -125,19 +126,80 @@ public final class SMSavedData extends SavedData {
 	/**
 	 * 添加物品到垃圾箱喵~
 	 * <p>
-	 * 遍历所有垃圾箱，找到第一个可以容纳该物品的容器并添加喵~
+	 * 新物品进入第一个垃圾箱的槽位0（最前面），其他物品后移让位喵~
+	 * 第一个垃圾箱满时挤出最后一格（最旧的物品），被挤出的物品进入第二个垃圾箱，以此类推形成垃圾箱链喵~
+	 * 最后一个垃圾箱挤出的物品消失喵~
 	 * </p>
 	 *
 	 * @param stack 要添加的物品堆喵~
 	 */
 	public void addItemToDustbin(ItemStack stack) {
+		if (stack.isEmpty()) {
+			return;
+		}
 		synchronized (this.dustbins) {
-			// Find the first dustbin that can be added items.
-			for (SimpleContainer dustbin : this.dustbins) {
-				if (dustbin.canAddItem(stack)) {
-					dustbin.addItem(stack);
-					return;
+			addToDustbinChain(0, stack.copy());
+		}
+	}
+
+	/**
+	 * 递归添加物品到垃圾箱链喵~
+	 * <p>
+	 * 在指定索引的垃圾箱内执行"最新最前"逻辑，被挤出的物品递归进入下一个垃圾箱。
+	 * </p>
+	 *
+	 * @param index 垃圾箱索引喵~
+	 * @param stack 要添加的物品堆喵~
+	 */
+	private void addToDustbinChain(int index, ItemStack stack) {
+		if (index >= this.dustbins.size() || stack.isEmpty()) {
+			return;  // 所有垃圾箱都满，物品消失
+		}
+		SimpleContainer dustbin = this.dustbins.get(index);
+		int size = dustbin.getContainerSize();
+		ItemStack remaining = stack.copy();
+
+		// 阶段1：合并到已有同种堆（原版合并逻辑，堆位置不变）
+		for (int i = 0; i < size && !remaining.isEmpty(); ++i) {
+			ItemStack existing = dustbin.getItem(i);
+			if (!existing.isEmpty() && ItemStack.isSameItemSameTags(existing, remaining)) {
+				int canGrow = existing.getMaxStackSize() - existing.getCount();
+				if (canGrow > 0) {
+					int grow = Math.min(remaining.getCount(), canGrow);
+					existing.grow(grow);
+					remaining.shrink(grow);
 				}
+			}
+		}
+		dustbin.setChanged();
+
+		// 完全合并完，无剩余 → 不移动
+		if (remaining.isEmpty()) {
+			return;
+		}
+
+		// 阶段2：有剩余新堆，拆分为多个maxSize堆
+		List<ItemStack> newStacks = new ArrayList<>();
+		while (!remaining.isEmpty()) {
+			int placeCount = Math.min(remaining.getMaxStackSize(), remaining.getCount());
+			newStacks.add(remaining.split(placeCount));
+		}
+
+		// 从最后一个新堆开始插入槽0，保证第一个最终在槽0（顺序连续排列）
+		for (int i = newStacks.size() - 1; i >= 0; --i) {
+			// 强制后移所有物品1格：从最后一格开始，每格内容=前一格内容
+			// 容器满时最后一格被挤出（丢弃最旧的）；容器不满时空槽被吸收到后面
+			ItemStack evicted = dustbin.getItem(size - 1);  // 最后一格被挤出
+			for (int j = size - 1; j > 0; --j) {
+				dustbin.setItem(j, dustbin.getItem(j - 1));
+			}
+			// 槽0腾出，放入新堆
+			dustbin.setItem(0, newStacks.get(i));
+			dustbin.setChanged();
+
+			// 被挤出的物品进入下一个垃圾箱（递归）
+			if (!evicted.isEmpty()) {
+				addToDustbinChain(index + 1, evicted);
 			}
 		}
 	}
